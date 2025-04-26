@@ -12,7 +12,7 @@ from .backgrounds.panorama import Panorama
 
 
 class Scene():
-    def __init__(self, ambient_color = rgb(0.01, 0.01, 0.01), n = vec3(1.0,1.0,1.0)) :
+    def __init__(self, ambient_color = rgb(0.01, 0.01, 0.01), n = vec3(1.0,1.0,1.0), use_quantum_raytracing=False) :
         # n = index of refraction (by default index of refraction of air n = 1.)
         
         self.scene_primitives = []
@@ -23,8 +23,42 @@ class Scene():
         self.ambient_color = ambient_color
         self.n = n
         self.importance_sampled_list = []
-    def add_Camera(self, look_from, look_at, **kwargs):
-        self.camera = Camera(look_from, look_at, **kwargs)
+
+        self.use_quantum_raytracing = use_quantum_raytracing
+        self.quantum_config = None
+        self.quantum_neighbor_data = None
+
+    def enable_quantum_raytracing(self, config=None):
+        """
+        Enable quantum ray tracing with optional configuration.
+        
+        Args:
+            config: Configuration for quantum ray tracing
+        """
+        self.use_quantum_raytracing = True
+        
+        # Import quantum modules only when needed
+        from .quantum import QTraceConfig
+        if config is None:
+            self.quantum_config = QTraceConfig()
+        else:
+            self.quantum_config = config
+            
+        print("Quantum ray tracing enabled")
+        
+    def disable_quantum_raytracing(self):
+        """Disable quantum ray tracing."""
+        self.use_quantum_raytracing = False
+        self.quantum_config = None
+        print("Quantum ray tracing disabled")
+
+
+    def add_Camera(self, look_from, look_at, screen_width = 400, screen_height = 300, **kwargs):
+        self.camera = Camera(look_from=look_from, look_at=look_at, screen_width=screen_width, screen_height=screen_height, **kwargs)
+
+        if self.use_quantum_raytracing and self.quantum_config and self.quantum_config.use_image_coherence:
+            from .quantum.quantum_raytracer import QuantumNeighborData
+            self.quantum_neighbor_data = QuantumNeighborData(screen_width, screen_height)
 
 
     def add_PointLight(self, pos, color):
@@ -55,46 +89,176 @@ class Scene():
         self.scene_primitives += [primitive]        
         self.collider_list += primitive.collider_list
 
+    def trace_ray_quantum(self, ray, pixel_x=None, pixel_y=None):
+        """
+        Trace a ray using quantum ray tracing.
         
-    def render(self, samples_per_pixel, progress_bar = False):
-
-        print ("Rendering...")
+        Args:
+            ray: The ray to trace
+            pixel_x: X coordinate of the pixel (for image coherence)
+            pixel_y: Y coordinate of the pixel (for image coherence)
+            
+        Returns:
+            The color of the intersection
+        """
+        # Import trace_ray only when needed
+        from .quantum import trace_ray
+        
+        # Add pixel coordinates for image coherence
+        if pixel_x is not None and pixel_y is not None:
+            ray.pixel_x = pixel_x
+            ray.pixel_y = pixel_y
+        
+        # Use quantum ray tracing
+        primitive_idx, distance, normal = trace_ray(ray, self, self.quantum_config)
+        
+        # Update neighbor data for image coherence
+        if (self.quantum_neighbor_data is not None and
+            primitive_idx >= 0 and
+            pixel_x is not None and
+            pixel_y is not None):
+            self.quantum_neighbor_data.update(pixel_x, pixel_y, primitive_idx)
+        
+        # If no intersection, return black or skybox color
+        if primitive_idx < 0:
+            return rgb(0., 0., 0.)
+        
+        # Get the primitive and calculate color
+        primitive = self.scene_primitives[primitive_idx]
+        material = primitive.material
+        
+        # Create a hit object with necessary information
+        hit = type('Hit', (), {
+            'collider': primitive.collider_list[0],
+            'distance': distance,
+            'point': ray.origin + ray.dir * distance,
+            'surface': primitive,
+            'material': material,
+            'orientation': UPWARDS if normal.dot(ray.dir) < 0 else UPDOWN,
+            'N': normal,
+            'get_uv': lambda: primitive.get_uv(type('TempHit', (), {'point': ray.origin + ray.dir * distance, 'collider': primitive.collider_list[0]}))
+        })
+        
+        # Get the color from the material
+        return material.get_color(self, ray, hit)
+        
+    def render(self, samples_per_pixel, progress_bar=False):
+        print("Rendering...")
 
         t0 = time.time()
-        color_RGBlinear = rgb(0.,0.,0.)
+        color_RGBlinear = rgb(0., 0., 0.)
 
-        if progress_bar == True:
-
-
+        # Import progressbar if needed
+        if progress_bar:
             try:
                 import progressbar
-
+                bar_available = True
             except ModuleNotFoundError:
-                 print("progressbar module is required. \nRun: pip install progressbar")
-            
-            bar = progressbar.ProgressBar()
-            for i in bar(range(samples_per_pixel)):
-                color_RGBlinear += get_raycolor(self.camera.get_ray(self.n), scene = self)
-                bar.update(i)
+                print("progressbar module is required. \nRun: pip install progressbar")
+                bar_available = False
         else:
+            bar_available = False
 
-
-            for i in range(samples_per_pixel):
-                color_RGBlinear += get_raycolor(self.camera.get_ray(self.n), scene = self)
+        # Set up progress bar if available
+        if bar_available and progress_bar:
+            bar = progressbar.ProgressBar()
+            sample_range = bar(range(samples_per_pixel))
+        else:
+            sample_range = range(samples_per_pixel)
+            
+        # Check if quantum ray tracing is enabled
+        using_quantum = self.use_quantum_raytracing and hasattr(self, 'quantum_config')
+        if using_quantum:
+            print("Using quantum ray tracing")
+            
+            # Import trace_ray from the quantum module
+            from .quantum import trace_ray
+            
+            # Create a wrapper function that adapts the quantum trace_ray to work like get_raycolor
+            def quantum_get_raycolor(ray, scene):
+                """Wrapper to make quantum ray tracing compatible with classical interface"""
+                # Create arrays to store results
+                total_pixels = len(ray.origin.x)
+                result_color = rgb(
+                    np.zeros(total_pixels),
+                    np.zeros(total_pixels),
+                    np.zeros(total_pixels)
+                )
                 
+                # Process each ray
+                for idx in range(total_pixels):
+                    # Create a mask for this pixel
+                    pixel_mask = np.zeros(total_pixels, dtype=bool)
+                    pixel_mask[idx] = True
+                    
+                    # Get pixel coordinates
+                    y = idx // self.camera.screen_width
+                    x = idx % self.camera.screen_width
+                    
+                    # Create a ray for this pixel
+                    try:
+                        # Try to extract a single ray
+                        single_ray = ray.extract(pixel_mask)
+                        
+                        # Add pixel coordinates
+                        single_ray.pixel_x = x
+                        single_ray.pixel_y = y
+                        
+                        # Trace with quantum algorithm
+                        primitive_idx, distance, normal = trace_ray(single_ray, scene, scene.quantum_config)
+                        
+                        # Process intersection
+                        if primitive_idx >= 0:
+                            # Try a simplified approach - create a classical ray and use get_raycolor
+                            # This avoids all the complexity of creating compatible hit objects
+                            classical_ray = Ray(
+                                origin=single_ray.origin,
+                                dir=single_ray.dir,
+                                depth=single_ray.depth,
+                                n=single_ray.n,
+                                reflections=single_ray.reflections,
+                                transmissions=single_ray.transmissions,
+                                diffuse_reflections=single_ray.diffuse_reflections
+                            )
+                            
+                            # Use the classical get_raycolor for shading
+                            pixel_color = get_raycolor(classical_ray, scene)
+                            
+                            # Place the color in our result array
+                            result_color.x[idx] = pixel_color.x
+                            result_color.y[idx] = pixel_color.y
+                            result_color.z[idx] = pixel_color.z
+                        
+                    except Exception as e:
+                        print(f"Error processing ray at pixel ({x}, {y}): {e}")
+                        # Keep the color as zeros
+                
+                return result_color
 
+        # Rendering loop
+        for i in sample_range:
+            if using_quantum:
+                # Use our quantum wrapper function
+                color_RGBlinear += quantum_get_raycolor(self.camera.get_ray(self.n), self)
+            else:
+                # Classical ray tracing (unchanged)
+                color_RGBlinear += get_raycolor(self.camera.get_ray(self.n), scene=self)
 
-        #average samples per pixel (antialiasing)
-        color_RGBlinear = color_RGBlinear/samples_per_pixel
-        #gamma correction
+            if bar_available and progress_bar:
+                bar.update(i)
+
+        # Average samples per pixel (antialiasing)
+        color_RGBlinear = color_RGBlinear / samples_per_pixel
+        
+        # Gamma correction
         color = cf.sRGB_linear_to_sRGB(color_RGBlinear.to_array())
         
-        print ("Render Took", time.time() - t0)
+        print("Render Took", time.time() - t0)
 
         img_RGB = []
         for c in color:
-            # average ray colors that fall in the same pixel. (antialiasing) 
-            img_RGB += [Image.fromarray((255 * np.clip(c, 0, 1).reshape((self.camera.screen_height, self.camera.screen_width))).astype(np.uint8), "L") ]
+            # Average ray colors that fall in the same pixel
+            img_RGB += [Image.fromarray((255 * np.clip(c, 0, 1).reshape((self.camera.screen_height, self.camera.screen_width))).astype(np.uint8), "L")]
 
         return Image.merge("RGB", img_RGB)
 

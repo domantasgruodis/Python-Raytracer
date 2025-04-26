@@ -51,7 +51,7 @@ class Hit:
 
     def get_normal(self):
         if self.N is None: #this is for prevent multiple computations of normal
-            self.N = self.collider.get_N(self)
+            self.N = self.collider.get_Normal(self)
         return self.N
 
 
