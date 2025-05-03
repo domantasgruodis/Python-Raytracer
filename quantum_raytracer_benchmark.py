@@ -147,7 +147,7 @@ def run_benchmark():
     
     # Configure quantum ray tracing
     quantum_config = QTraceConfig(
-        use_image_coherence=True,
+        use_image_coherence=False,
         use_termination_criterion=True,
         max_iterations=2,
         shots_per_search=512,
