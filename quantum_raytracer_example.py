@@ -1,11 +1,5 @@
-"""
-Example of quantum ray tracing with SightPy.
-This demonstrates how to enable quantum ray tracing and configure it.
-"""
 from sightpy import *
-from sightpy.quantum import QTraceConfig, filter_qiskit_warnings
-
-filter_qiskit_warnings()
+from sightpy.quantum import QTraceConfig
 
 # Create a simple scene
 def create_scene():
@@ -16,7 +10,7 @@ def create_scene():
     quantum_config = QTraceConfig(
         use_image_coherence=True,
         use_termination_criterion=True,
-        max_iterations=3,
+        max_iterations=1,
         shots_per_search=1024,
         debug=True  # Set to True for detailed logging
     )
@@ -77,7 +71,7 @@ def main():
     
     print("Rendering with quantum ray tracing...")
     # Render with low samples for testing
-    img = scene.render(samples_per_pixel=5, progress_bar=True)
+    img = scene.render(samples_per_pixel=1, progress_bar=True)
     img.save("quantum_render.png")
     
     print("Done! Image saved as quantum_render.png")
@@ -85,7 +79,7 @@ def main():
     # Compare with classical ray tracing
     print("Rendering with classical ray tracing for comparison...")
     scene.disable_quantum_raytracing()
-    img_classical = scene.render(samples_per_pixel=5, progress_bar=True)
+    img_classical = scene.render(samples_per_pixel=1, progress_bar=True)
     img_classical.save("classical_render.png")
     
     print("Done! Compare quantum_render.png and classical_render.png")
